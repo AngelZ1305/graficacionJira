@@ -1,0 +1,49 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>Métricas Jira</title>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+  <div class="grid">
+
+    <div class="kpis">
+      <div class="kpi">
+        <h2>Tiempo promedio</h2>
+        <div class="valor" id="kpiTiempoPromedio">--</div>
+      </div>
+
+      <div class="kpi">
+        <h2>Ratio de aceptación</h2>
+        <div class="valor" id="kpiRatioAceptacion">--</div>
+      </div>
+
+      <div class="kpi">
+        <h2>Gasto total general</h2>
+        <div class="valor" id="kpiGastoTotal">--</div>
+      </div>
+    </div>
+
+    <div class="card">
+      <h2>Tiempo de completado por solicitud</h2>
+      <canvas id="chartTiempo"></canvas>
+    </div>
+
+    <div class="card">
+      <h2>Distribución de solicitudes</h2>
+      <canvas id="chartAceptacion"></canvas>
+    </div>
+
+    <div class="card">
+      <h2>Gasto por categoría</h2>
+      <canvas id="chartGastoCategoria"></canvas>
+    </div>
+
+  </div>
+
+  <script src="app.js"></script>
+</body>
+</html>
