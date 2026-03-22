@@ -1,6 +1,8 @@
 import express from "express";
 import cors from "cors";
 import dotenv from "dotenv";
+import { createServer } from "http";
+import { WebSocketServer } from "ws";
 
 dotenv.config();
 
@@ -39,9 +41,6 @@ const ESTADOS_APROBADOS = [
 
 const ESTADOS_RECHAZADOS = ["Rechazada"];
 
-/**
- * Hace requests a Jira con autenticación Basic
- */
 async function jiraRequest(path, params = {}) {
   const url = new URL(`${JIRA_URL}${path}`);
 
@@ -69,9 +68,6 @@ async function jiraRequest(path, params = {}) {
   return response.json();
 }
 
-/**
- * Consulta todas las solicitudes del proyecto con paginación
- */
 async function obtenerSolicitudes() {
   const jql = `project = ${JIRA_PROJECT_KEY} AND issuetype = Solicitud`;
   const issues = [];
@@ -83,7 +79,7 @@ async function obtenerSolicitudes() {
       jql,
       startAt,
       maxResults,
-      fields: `summary,status,created,resolutiondate,${FIELD_MONTO},${FIELD_CATEGORIA}`
+      fields: `summary,status,created,resolutiondate,updated,${FIELD_MONTO},${FIELD_CATEGORIA}`
     });
 
     const pageIssues = data.issues || [];
@@ -100,27 +96,19 @@ async function obtenerSolicitudes() {
   return issues;
 }
 
-/**
- * Convierte string ISO a Date segura
- */
 function parseJiraDate(dateStr) {
   if (!dateStr) return null;
   const date = new Date(dateStr);
   return Number.isNaN(date.getTime()) ? null : date;
 }
 
-/**
- * Obtiene nombre de categoría desde custom field
- */
 function getCategoriaValue(categoriaField) {
   if (!categoriaField) return "Sin Categoría";
 
-  // Caso típico select field: { value: "Equipo" }
   if (typeof categoriaField === "object" && categoriaField.value) {
     return categoriaField.value;
   }
 
-  // Si Jira devuelve string directo
   if (typeof categoriaField === "string") {
     return categoriaField;
   }
@@ -128,18 +116,12 @@ function getCategoriaValue(categoriaField) {
   return "Sin Categoría";
 }
 
-/**
- * Normaliza monto
- */
 function getMontoValue(value) {
   if (value === null || value === undefined) return 0;
   const monto = Number(value);
   return Number.isFinite(monto) ? monto : 0;
 }
 
-/**
- * Métrica 1: tiempo promedio de completado
- */
 function calcularMetricaTiempo(solicitudes) {
   const ahora = new Date();
   const inicioMes = new Date(Date.UTC(ahora.getUTCFullYear(), ahora.getUTCMonth(), 1, 0, 0, 0, 0));
@@ -190,9 +172,6 @@ function calcularMetricaTiempo(solicitudes) {
   };
 }
 
-/**
- * Métrica 2: ratio de aceptación
- */
 function calcularMetricaAceptacion(solicitudes) {
   const total = solicitudes.length;
 
@@ -218,9 +197,6 @@ function calcularMetricaAceptacion(solicitudes) {
   };
 }
 
-/**
- * Métrica 3: gasto por categoría
- */
 function calcularMetricaGasto(solicitudes) {
   const acumulado = new Map();
 
@@ -272,9 +248,22 @@ function calcularMetricaGasto(solicitudes) {
   };
 }
 
-/**
- * Endpoint de salud
- */
+async function construirMetricas() {
+  const solicitudes = await obtenerSolicitudes();
+
+  return {
+    ok: true,
+    proyecto: JIRA_PROJECT_KEY,
+    totalSolicitudes: solicitudes.length,
+    metric1: calcularMetricaTiempo(solicitudes),
+    metric2: calcularMetricaAceptacion(solicitudes),
+    metric3: calcularMetricaGasto(solicitudes),
+    updatedAt: new Date().toISOString()
+  };
+}
+
+/* -------------------- HTTP -------------------- */
+
 app.get("/", (req, res) => {
   res.json({
     ok: true,
@@ -282,25 +271,10 @@ app.get("/", (req, res) => {
   });
 });
 
-/**
- * Endpoint principal para frontend
- */
 app.get("/api/metricas", async (req, res) => {
   try {
-    const solicitudes = await obtenerSolicitudes();
-
-    const metric1 = calcularMetricaTiempo(solicitudes);
-    const metric2 = calcularMetricaAceptacion(solicitudes);
-    const metric3 = calcularMetricaGasto(solicitudes);
-
-    res.json({
-      ok: true,
-      proyecto: JIRA_PROJECT_KEY,
-      totalSolicitudes: solicitudes.length,
-      metric1,
-      metric2,
-      metric3
-    });
+    const metricas = await construirMetricas();
+    res.json(metricas);
   } catch (error) {
     console.error("Error en /api/metricas:", error.message);
 
@@ -311,14 +285,15 @@ app.get("/api/metricas", async (req, res) => {
     });
   }
 });
+
 app.get("/api/debug-fields", async (req, res) => {
   try {
     const solicitudes = await obtenerSolicitudes();
     const primera = solicitudes[0];
 
     res.json({
-      key: primera.key,
-      fields: primera.fields
+      key: primera?.key,
+      fields: primera?.fields
     });
   } catch (error) {
     res.status(500).json({ error: error.message });
@@ -329,7 +304,7 @@ app.get("/api/debug-jira-fields", async (req, res) => {
   try {
     const data = await jiraRequest("/rest/api/3/field");
     res.json(
-      data.map(field => ({
+      data.map((field) => ({
         id: field.id,
         name: field.name,
         custom: field.custom
@@ -339,6 +314,102 @@ app.get("/api/debug-jira-fields", async (req, res) => {
     res.status(500).json({ error: error.message });
   }
 });
-app.listen(PORT, () => {
-  console.log(`Servidor escuchando en http://localhost:${PORT}`);
+
+/* -------------------- WebSocket -------------------- */
+
+const server = createServer(app);
+const wss = new WebSocketServer({ server, path: "/ws" });
+
+const clients = new Set();
+let lastPayloadHash = "";
+
+function broadcast(data) {
+  const message = JSON.stringify(data);
+
+  for (const client of clients) {
+    if (client.readyState === 1) {
+      client.send(message);
+    }
+  }
+}
+
+wss.on("connection", async (ws) => {
+  console.log("Cliente conectado al WebSocket");
+  clients.add(ws);
+
+  ws.send(
+    JSON.stringify({
+      type: "connection",
+      message: "Conectado al WebSocket de métricas"
+    })
+  );
+
+  try {
+    const metricas = await construirMetricas();
+    ws.send(
+      JSON.stringify({
+        type: "metricas_iniciales",
+        data: metricas
+      })
+    );
+  } catch (error) {
+    ws.send(
+      JSON.stringify({
+        type: "error",
+        message: error.message
+      })
+    );
+  }
+
+  ws.on("close", () => {
+    clients.delete(ws);
+    console.log("Cliente desconectado del WebSocket");
+  });
+
+  ws.on("error", () => {
+    clients.delete(ws);
+  });
+
+  ws.on("message", (message) => {
+    const text = message.toString();
+
+    if (text === "ping") {
+      ws.send(JSON.stringify({ type: "pong" }));
+    }
+  });
+});
+
+/* -------------------- Polling a Jira -------------------- */
+
+async function revisarCambiosYEmitir() {
+  try {
+    const metricas = await construirMetricas();
+    const payloadHash = JSON.stringify(metricas);
+
+    if (payloadHash !== lastPayloadHash) {
+      lastPayloadHash = payloadHash;
+
+      broadcast({
+        type: "metricas_actualizadas",
+        data: metricas
+      });
+
+      console.log("Métricas actualizadas enviadas a clientes");
+    }
+  } catch (error) {
+    console.error("Error revisando cambios:", error.message);
+
+    broadcast({
+      type: "error",
+      message: "Error actualizando métricas",
+      detail: error.message
+    });
+  }
+}
+
+setInterval(revisarCambiosYEmitir, 15000);
+
+server.listen(PORT, () => {
+  console.log(`Servidor HTTP + WS en http://localhost:${PORT}`);
+  console.log(`WebSocket disponible en ws://localhost:${PORT}/ws`);
 });
